@@ -6,9 +6,6 @@ source code** but somewhere along the build supply chain: dependency resolution,
 configuration, compilation, code generation, linking, packaging, install hooks,
 JIT, caching, CI/CD, or release.
 
-> **Defining test:** *the source looks fine, but the produced / installed /
-> executed artifact does not match it.*
-
 Every incident is linked to a **concrete code segment** on disk
 (`snippets/<incident_id>/…`) plus structured evidence, artifacts, taxonomy labels,
 and per-incident defense coverage.
