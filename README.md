@@ -1,111 +1,249 @@
 # Toxic Compilation Dataset
 
 An **incident-centered, multi-layer** dataset for the empirical study of *toxic
-compilation* — security or correctness problems that are introduced **not in the
-reviewed source code** but during dependency resolution, configuration,
-compilation, code generation, linking, packaging, install, JIT, caching, CI/CD,
-or release.
+compilation* — security or correctness problems introduced **not in the reviewed
+source code** but somewhere along the build supply chain: dependency resolution,
+configuration, compilation, code generation, linking, packaging, install hooks,
+JIT, caching, CI/CD, or release.
 
-> Defining test: *the source looks fine, but the produced / installed / executed
-> artifact does not match it.*
+> **Defining test:** *the source looks fine, but the produced / installed /
+> executed artifact does not match it.*
 
 Every incident is linked to a **concrete code segment** on disk
-(`snippets/<incident_id>/...`) plus structured evidence, artifacts, and taxonomy
-labels.
+(`snippets/<incident_id>/…`) plus structured evidence, artifacts, taxonomy labels,
+and per-incident defense coverage.
 
-## Layout
+| record-level incidents | campaign-level (dedup) | with code | ecosystems | incident types |
+|---:|---:|---:|---:|---:|
+| **1703** | **1142** | **1463 (86%)** | 15 | 13 |
+
+*Report the campaign-level count (1142) in the paper to avoid double-counting
+multi-CVE / multi-version events.*
+
+---
+
+## 1. Introduction
+
+Traditional software-supply-chain studies focus on vulnerable *source code*.
+This dataset instead collects incidents where the **source is not the problem** —
+the toxicity is injected while the source is turned into a runnable artifact.
+Representative families:
+
+- **Dependency-resolution attacks** — typosquatting, dependency confusion,
+  malicious/compromised packages (npm, PyPI, crates.io, Maven, Go, RubyGems…).
+- **Install / lifecycle abuse** — `postinstall`, `setup.py`, build scripts that
+  run attacker code at install time.
+- **AI-compiler correctness & cache poisoning** — TorchInductor / Triton / TVM /
+  vLLM / XLA generated-code deviations and JIT / compile-cache poisoning
+  (`maliciousness = correctness_only`).
+- **Artifact / release divergence** — source-tarball vs released-artifact
+  mismatch, prebuilt-object substitution.
+- **Landmark cases** — XZ backdoor, "Reflections on Trusting Trust", SolarWinds,
+  event-stream, ua-parser-js, node-ipc, torchtriton…
+
+Each incident is annotated along the build pipeline so the corpus can answer
+where toxicity enters, how it travels, why review misses it, and what defends
+against it.
+
+---
+
+## 2. Directory structure
+
 ```
 toxic-compilation-dataset/
-├── schema/                 JSON Schemas (one per layer) + annotation_guideline.md
-├── taxonomy/taxonomy.json  controlled vocabulary + keyword classification rules
-├── data/                   CANONICAL data (JSONL, one record per line)
-│   ├── incidents.jsonl         Layer 1 — the unit of study
-│   ├── evidence.jsonl          Layer 2 — CVE/GHSA/OSV/advisory/report/paper
-│   ├── artifacts.jsonl         Layer 3 — tarball/wheel/gem/cache/binary…
-│   ├── code_evidence.jsonl     Layer 4 — concrete code segment (snippet_path)
-│   ├── labels.jsonl            Layer 5 — taxonomy annotation (multi-annotator)
-│   └── defense_coverage.jsonl  Layer 6 — per-incident defense coverage (RQ4)
-├── snippets/<incident_id>/ the actual code file(s) for each incident
-├── raw/                    cached source data (DataDog tree, intermediate jsonl)
-├── exports/                DERIVED: *.csv + statistics.sqlite (for stats/plots)
-└── scripts/                the reproducible pipeline
+├── README.md                  this file
+├── readme.html                interactive browser (filter/search 1703 incidents)
+├── view_dataset.bat           serve readme.html at http://localhost:8000
+│
+├── schema/                    JSON Schema, one per layer, + annotation_guideline.md
+│   ├── incident.schema.json
+│   ├── evidence.schema.json
+│   ├── artifact.schema.json
+│   └── defense_coverage.schema.json
+├── taxonomy/taxonomy.json     controlled vocabulary + keyword classification rules
+│
+├── data/                      CANONICAL data — JSONL, one record per line
+│   ├── incidents.jsonl            Layer 1 — the unit of study (1703 records)
+│   ├── evidence.jsonl             Layer 2 — CVE / GHSA / OSV / advisory / report / paper
+│   ├── artifacts.jsonl            Layer 3 — tarball / wheel / gem / cache / binary…
+│   ├── code_evidence.jsonl        Layer 4 — concrete code segment (snippet_path, provenance)
+│   ├── labels.jsonl               Layer 5 — taxonomy annotation (multi-annotator)
+│   └── defense_coverage.jsonl     Layer 6 — per-incident defense coverage (RQ4)
+│
+├── snippets/<incident_id>/     the actual code file(s) — 1463 incidents
+│                               (NEUTRALIZED: saved as *.txt, non-executable)
+├── raw/                        cached source data (DataDog tree, intermediate JSONL)
+│
+├── exports/                   DERIVED (regenerated by the pipeline)
+│   ├── *.csv                       one CSV per data-layer JSONL
+│   ├── statistics.sqlite           queryable DB (tables + v_* views)
+│   ├── STATISTICS.md               human-readable breakdowns
+│   ├── figures/*.svg               one bar chart per taxonomy dimension
+│   └── tables/*.csv, *.tex         paper-ready count tables + LaTeX
+│
+└── scripts/                   the reproducible, stdlib-only pipeline
+    ├── run_all.py                  end-to-end driver
+    ├── 01_fetch_datadog.py         fetch archived malicious npm/PyPI/AI-skill packages
+    ├── 02_curated_seed.py          landmark + AI-compiler curated cases
+    ├── 06_fetch_osv_advisories.py  OSV CVE/GHSA/PYSEC/RUSTSEC (keyword-filtered)
+    ├── 07_fetch_github_issues.py   AI-compiler codegen / JIT-cache issues
+    ├── 03_build_dataset.py         normalize → classify → write the 6 layers + snippets
+    ├── 04_export.py                JSONL → CSV + statistics.sqlite
+    ├── 08_stats.py                 STATISTICS.md + figures + tables (csv/tex)
+    ├── 05_gen_readme_html.py       build the interactive readme.html
+    ├── classify.py                 taxonomy keyword classifier
+    └── common.py                   shared paths / fetch helpers (stdlib only)
 ```
 
-## Data sources
-| Source | What it gives | Code? |
+---
+
+## 3. Features
+
+**Six linked layers.** Each incident (Layer 1) joins to evidence, artifacts,
+concrete code, taxonomy labels, and defense coverage by `incident_id`, so you can
+slice the corpus along documents, artifacts, code, or annotations.
+
+**Rich taxonomy (multi-label where noted).** Every incident is tagged with:
+
+| dimension | field | examples |
 |---|---|---|
-| **OSV advisories** (CVE/GHSA/PYSEC/RUSTSEC, keyword-filtered) | build/install/packaging/codegen/supply-chain advisories across PyPI, Maven, Go, Packagist, NuGet, RubyGems, crates.io, Hex | usually no (advisory text; sometimes a fenced excerpt) |
-| **GitHub Issues** | AI-compiler codegen / JIT-cache / compile-cache correctness (Triton, TorchInductor/PyTorch, TVM, vLLM, TileLang, XLA, LLVM) + build-cache/install | sometimes (issue repro block) |
-| **DataDog `malicious-software-packages-dataset`** | archived malicious npm / PyPI / AI-skill packages | **yes — real archived code** |
-| **Curated landmark + AI set** | XZ, Trusting Trust, SolarWinds, event-stream, ua-parser-js, torchtriton, node-ipc, Triton/vLLM/TileLang cache … | yes (published / reconstructed, labelled) |
+| build stage entered *(RQ1)* | `injection_stage` | dependency_resolution · install · compilation · packaging · jit · code_generation · ci_cd |
+| attack carrier *(RQ2)* | `carrier` | dependency · lifecycle_script · package_manifest · generated_code · build_script · wheel |
+| why review misses it *(RQ3)* | `visibility_gap` | source_artifact_gap · typosquat_namespace · transitive_dependency · cache_opacity |
+| applicable defense *(RQ4)* | `detectability` / `defense_coverage` | manual_review · build_script_analysis · behavioral_analysis · reproducible_build · slsa_provenance |
+| plus | `ecosystem`, `incident_type`, `root_cause`, `severity`, `payload`, `impact_scope`, `maliciousness`, `confidence` | |
 
-NVD is network-blocked in some environments; CVE/GHSA come via **OSV** (which
-carries CVE aliases) instead. Code is **not required** for every entry — each
-incident has a boolean `code_available`. `snippet_provenance` in
-`code_evidence.jsonl` records the code kind: `actual_archived`, `actual_published`,
-`advisory_excerpt`, `issue_excerpt`, or `reconstructed`.
+**Two orthogonal evidence axes** — `evidence_type` (document kind: advisory /
+sample_archive / vendor_report / issue / PR / commit / blog / paper / web) and
+`id_namespace` (ID scheme: CVE / GHSA / MAL / PYSEC / RUSTSEC / OSV / none). A CVE
+entry can independently have code (`code_available=true`).
 
-### Two orthogonal evidence axes (see the left-panel dropdowns in readme.html)
-- **`evidence_type`** (document kind): `advisory`, `sample_archive`, `vendor_report`,
-  `issue`, `pull_request`, `commit`, `blog`, `paper`, `web`.
-- **`id_namespace`** (ID scheme): `CVE`, `GHSA`, `MAL`, `PYSEC`, `RUSTSEC`, `OSV`, `none`.
+**Concrete, provenance-tagged code.** `snippet_provenance` records each segment's
+kind: `actual_archived`, `actual_published`, `advisory_excerpt`, `issue_excerpt`,
+or `llm_reconstructed` (illustrative, header-flagged as not the exact published
+code).
 
-### LLM relevance & reconstructed code
-Keyword-collected advisories are noisy, so each is LLM-judged into
-`llm_relevance` = `toxic_compilation` (in scope) or `off_topic` (false positive,
-`confidence=excluded`). For in-scope CVEs without crawlable code, an LLM produces an
-**illustrative reconstruction** (`snippet_provenance=llm_reconstructed`, header
-comment says "not the exact published code"). CVE and code are independent: an entry
-can be `id_namespace=CVE` **and** `code_available=true`.
+**Quality/impact metrics** per incident (`metrics`): GitHub `repo_stars`,
+`issue_reactions`, `issue_comments`; advisory `cvss_score`, `severity`,
+`n_references`; DataDog `n_files` — all filterable in `readme.html`.
 
-### Quality metrics (filterable numeric ranges in readme.html)
-Per `incidents.jsonl` `metrics`: GitHub issues carry `repo_stars`, `repo_forks`,
-`issue_reactions`, `issue_comments`; advisories carry `cvss_score`, `severity`,
-`n_references`; DataDog samples carry `n_files`.
+**Paper-ready exports.** `exports/` ships CSVs, a queryable `statistics.sqlite`
+(with `v_by_ecosystem` etc. views), `STATISTICS.md`, one SVG bar chart per
+dimension, and `tables/*.tex` LaTeX count tables you can `\input{}` directly.
 
-Corpus size is tunable via `TC_DATADOG_CAP` / `TC_ADVISORY_CAP` env vars (see
-`03_build_dataset.py`).
+**Interactive browser.** `readme.html` lists all 1703 incidents with left-panel
+dropdown filters (every taxonomy dimension), numeric range filters (the quality
+metrics), full-text search, and one-click to each incident's code snippet.
 
-## Reproduce
+**Safe by construction.** Malicious samples are **neutralized** for defensive
+research (see §7): every snippet is a non-executable `.txt` with a
+DO-NOT-EXECUTE banner; no runnable archives are stored on disk.
+
+---
+
+## 4. How to use
+
+> Pure Python **standard library** — **no `pip install`** required. Python 3.8+.
+
+### A. Browse the incidents (no code)
+
 ```bash
-cd scripts
-python run_all.py            # fetch → seed → build → export
-# or, if raw/dd_records.jsonl already exists:
-python run_all.py --no-fetch
+# Windows: double-click view_dataset.bat, or:
+python -m http.server 8000        # then open http://localhost:8000/readme.html
 ```
-Pure Python standard library — no `pip install` required. Tune corpus size via the
-`QUOTA` dict in `01_fetch_datadog.py`.
 
-## Query examples (SQLite)
+Use the left-panel dropdowns / range sliders / search box to filter, and click an
+incident to open its code snippet.
+
+### B. Query the data
+
+SQLite (derived):
 ```sql
-SELECT ecosystem, COUNT(*) FROM incidents GROUP BY ecosystem;     -- or: SELECT * FROM v_by_ecosystem;
+SELECT ecosystem, COUNT(*) FROM incidents GROUP BY ecosystem;   -- or: SELECT * FROM v_by_ecosystem;
 SELECT incident_type, COUNT(*) FROM incidents GROUP BY incident_type;
-SELECT * FROM incidents WHERE maliciousness='correctness_only';   -- AI-compiler cases
+SELECT * FROM incidents WHERE maliciousness = 'correctness_only';   -- AI-compiler cases
 ```
+```bash
+sqlite3 exports/statistics.sqlite "SELECT injection_stage, COUNT(*) FROM incident_stage GROUP BY 1;"
+```
+
+Canonical JSONL (Python / pandas):
 ```python
 import pandas as pd
 inc = pd.read_json("data/incidents.jsonl", lines=True)
+code = pd.read_json("data/code_evidence.jsonl", lines=True)
+inc.merge(code, on="incident_id").query("code_available")   # incidents with a snippet
 ```
 
-## Research framing (see `../有毒编译案例分析.pdf`)
-- **RQ1** which build stages are most exploited? (`injection_stage`)
-- **RQ2** what are the attack carriers? (`carrier`)
-- **RQ3** what visibility gaps hide them? (`visibility_gap`)
-- **RQ4** what do current defenses cover? (`detectability`)
+Read an incident's actual code:
+```bash
+ls snippets/TC-2026-00001/            # segment files (*.txt, neutralized)
+```
 
-## Provenance & ethics — SAMPLES ARE NEUTRALIZED
+### C. Reproduce / rebuild the whole dataset
+
+```bash
+cd scripts
+python run_all.py               # fetch → seed → build → export → stats → html
+python run_all.py --no-fetch    # skip network fetch if raw/dd_records.jsonl exists
+```
+
+Or run stages individually (`01_…`→`08_…`, then `05_…`); see `scripts/`.
+
+### D. Tune corpus size
+
+- DataDog sample quota — `QUOTA` dict in `scripts/01_fetch_datadog.py`.
+- Advisory / DataDog caps — env vars `TC_ADVISORY_CAP`, `TC_DATADOG_CAP`
+  (read in `03_build_dataset.py`).
+
+*Network note:* NVD is blocked in some environments; CVE/GHSA are pulled via
+**OSV** (which carries CVE aliases). Code is not required for every entry —
+`code_available` is a boolean per incident.
+
+---
+
+## 5. Data sources
+
+| Source | What it gives | Code? |
+|---|---|---|
+| **OSV advisories** (CVE/GHSA/PYSEC/RUSTSEC, keyword-filtered) | build/install/packaging/codegen/supply-chain advisories across PyPI, Maven, Go, Packagist, NuGet, RubyGems, crates.io, Hex | advisory text; sometimes a fenced excerpt |
+| **GitHub Issues** | AI-compiler codegen / JIT-cache / compile-cache correctness (Triton, TorchInductor/PyTorch, TVM, vLLM, TileLang, XLA, LLVM) + build/install cache | sometimes (issue repro block) |
+| **DataDog `malicious-software-packages-dataset`** | archived malicious npm / PyPI / AI-skill packages | **yes — real archived code** |
+| **Curated landmark + AI set** | XZ, Trusting Trust, SolarWinds, event-stream, ua-parser-js, torchtriton, node-ipc, Triton/vLLM/TileLang cache… | yes (published / reconstructed, labelled) |
+
+Distribution by source: DataDog 700 · GitHub issues 645 · OSV 344 · curated 14.
+
+---
+
+## 6. Research questions
+
+Framed for the accompanying case-study report (PDF, parent directory):
+
+- **RQ1** Which build stages are most exploited? → `injection_stage`
+- **RQ2** What are the attack carriers? → `carrier`
+- **RQ3** What visibility gaps hide them? → `visibility_gap`
+- **RQ4** What do current defenses cover? → `defense_coverage` (matrix in `STATISTICS.md`)
+
+---
+
+## 7. Provenance & ethics — SAMPLES ARE NEUTRALIZED
+
 Malicious code is included **for defensive research only**.
-- Every code segment under `snippets/<id>/` is saved with a **`.txt` suffix** (e.g.
-  `index.min.js.txt`) so it is **not executable** and won't run on a double-click.
-- Each file begins with a banner: `DEFENSIVE-RESEARCH SAMPLE - DO NOT EXECUTE.
-  Original name: <original>`. The real filename is preserved in `code_evidence.jsonl`
-  `file_path`.
-- No malware archives (`.zip`/`.tar.gz`) are kept on disk — sample zips are fetched
-  to memory, the representative file is extracted, and only its text is stored.
-- `raw/*.jsonl` are data caches that quote sample code as JSON strings (inert data,
-  not runnable). Your antivirus may still flag them by signature; treat the whole
-  `snippets/` and `raw/` trees as quarantined research material. **Do not execute.**
 
-## License / release
-Intended for release as a GitHub repository + Zenodo DOI. Respect upstream
-licenses of the DataDog dataset and any quoted advisories.
+- Every segment under `snippets/<id>/` is saved with a **`.txt` suffix** (e.g.
+  `index.min.js.txt`) so it is **not executable** and won't run on a double-click.
+- Each file begins with a banner: `DEFENSIVE-RESEARCH SAMPLE — DO NOT EXECUTE.
+  Original name: <original>`. The real filename is preserved in
+  `code_evidence.jsonl` → `file_path`.
+- **No malware archives** (`.zip`/`.tar.gz`) are kept on disk — sample zips are
+  fetched to memory, the representative file is extracted, and only its text is
+  stored.
+- `raw/*.jsonl` are data caches that quote sample code as inert JSON strings.
+  Antivirus may still flag them by signature; treat the whole `snippets/` and
+  `raw/` trees as **quarantined research material — do not execute.**
+
+---
+
+## 8. License / release
+
+Cite our case-study report  when using the corpus.
